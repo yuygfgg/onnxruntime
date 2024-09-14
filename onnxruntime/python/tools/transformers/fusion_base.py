@@ -58,8 +58,12 @@ class Fusion:
         It searched nodes of given operators, and start fusion on each of those nodes.
         """
         logger.debug(f"start {self.description} fusion...")
-        input_name_to_nodes = self.model.input_name_to_nodes()
-        output_name_to_node = self.model.output_name_to_node()
+        try:
+            input_name_to_nodes = self.model.input_name_to_nodes(exclude_subgraphs=True)
+            output_name_to_node = self.model.output_name_to_node(exclude_subgraphs=True)
+        except Exception as e:
+            print(f"Error: {e}")
+            return
 
         # This assumes that two search ops will not be fused at same time!
         for search_op_type in self.search_op_types:

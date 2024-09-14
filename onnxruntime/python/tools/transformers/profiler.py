@@ -1,3 +1,7 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.
+# --------------------------------------------------------------------------
 import argparse
 import json
 import os
@@ -52,6 +56,24 @@ def parse_arguments(argv=None):
         type=int,
         default=32,
         help="sequence length of input",
+    )
+
+    parser.add_argument(
+        "-ih",
+        "--image_height",
+        required=False,
+        type=int,
+        default=1024,
+        help="image height",
+    )
+
+    parser.add_argument(
+        "-iw",
+        "--image_width",
+        required=False,
+        type=int,
+        default=1024,
+        help="image width",
     )
 
     parser.add_argument(
@@ -120,7 +142,7 @@ def parse_arguments(argv=None):
         "--dummy_inputs",
         required=False,
         default="default",
-        choices=["bert", "gpt2", "longformer", "default"],
+        choices=["bert", "gpt2", "longformer", "sam2", "default"],
         help="Type of model inputs. The default will create dummy inputs with ones.",
     )
 
@@ -639,6 +661,41 @@ def create_longformer_inputs(onnx_model, batch_size, sequence_length, global_len
     return all_inputs
 
 
+def create_image_inputs(onnx_model, batch_size, image_height, image_width, samples):
+    """Create dummy inputs for Longformer model.
+
+    Args:
+        onnx_model (OnnxModel): ONNX model
+        batch_size (int): batch size
+        image_height (int): image height
+        image_width (int): image width
+        samples (int): number of samples
+
+    Returns:
+        List[Dict]: list of inputs
+    """
+    symbols = {"batch_size": batch_size, "image_height": image_height, "image_width": image_width}
+
+    dummy_inputs = {}
+    for graph_input in onnx_model.get_graph_inputs_excluding_initializers():
+        shape = get_shape_from_type_proto(graph_input.type)
+        for i, dim in enumerate(shape):
+            if isinstance(dim, str):
+                if dim not in symbols:
+                    raise RuntimeError(f"symbol is not supported: {dim}")
+                else:
+                    shape[i] = symbols[dim]
+
+        elem_type = graph_input.type.tensor_type.elem_type
+        assert elem_type in [TensorProto.FLOAT, TensorProto.FLOAT16]
+        data_type = numpy.float32 if elem_type == TensorProto.FLOAT else numpy.float16
+        image = (numpy.random.rand(shape) * 255).astype(dtype=data_type)
+        dummy_inputs[graph_input.name] = image
+
+    all_inputs = [dummy_inputs for _ in range(samples)]
+    return all_inputs
+
+
 def process_results(profile_file, args):
     profile_records = load_profile_json(profile_file)
 
@@ -688,6 +745,14 @@ def run(args):
             args.batch_size,
             args.sequence_length,
             args.global_length,
+            args.samples,
+        )
+    elif args.dummy_inputs == "sam2":
+        all_inputs = create_image_inputs(
+            onnx_model,
+            args.batch_size,
+            args.image_height,
+            args.image_width,
             args.samples,
         )
     else:  # default

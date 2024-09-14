@@ -63,9 +63,10 @@ class OnnxModel:
 
         return None
 
-    def input_name_to_nodes(self):
+    def input_name_to_nodes(self, exclude_subgraphs=False):
         input_name_to_nodes = {}
-        for node in self.nodes():
+        all_nodes = self.model.graph.node if exclude_subgraphs else self.nodes()
+        for node in all_nodes:
             for input_name in node.input:
                 if input_name:  # could be empty when it is optional
                     if input_name not in input_name_to_nodes:
@@ -74,9 +75,10 @@ class OnnxModel:
                         input_name_to_nodes[input_name].append(node)
         return input_name_to_nodes
 
-    def output_name_to_node(self):
+    def output_name_to_node(self, exclude_subgraphs=False):
         output_name_to_node = {}
-        for node in self.nodes():
+        all_nodes = self.model.graph.node if exclude_subgraphs else self.nodes()
+        for node in all_nodes:
             for output_name in node.output:
                 if output_name:  # could be empty when it is optional
                     output_name_to_node[output_name] = node
