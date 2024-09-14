@@ -85,24 +85,15 @@ def show_masks(
             plt.savefig(f"{output_image_file_prefix}_{i}.png")
 
 
-def torch_predictor(device, model_type="sam2_hiera_large"):
+def get_predictor(device, model_type="sam2_hiera_large", engine="torch"):
     sam2_checkpoint = f"{model_type}.pt"
     model_cfg = get_model_cfg(model_type)
-
     sam2_model = build_sam2(model_cfg, sam2_checkpoint, device=device)
-    predictor = SAM2ImagePredictor(sam2_model)
+    if engine == "torch":
+       predictor = SAM2ImagePredictor(sam2_model)
+    else:
+       predictor = SAM2ImageOnnxPredictor(sam2_model, model_type=model_type)
     return predictor
-
-
-def onnx_predictor(device, model_type="sam2_hiera_large"):
-    sam2_checkpoint = f"{model_type}.pt"
-    model_cfg = get_model_cfg(model_type)
-
-    sam2_model = build_sam2(model_cfg, sam2_checkpoint, device=device)
-    encoder_onnx_path = f"{model_type}.onnx"
-    predictor = SAM2ImageOnnxPredictor(sam2_model, encoder_onnx_path)
-    return predictor
-
 
 def run_demo(model_type="sam2_hiera_large", engine="torch"):
     if torch.cuda.is_available():
@@ -120,16 +111,10 @@ def run_demo(model_type="sam2_hiera_large", engine="torch"):
     image = Image.open("truck.jpg")
     image = np.array(image.convert("RGB"))
 
-    prefix = f"sam2_demo_{engine}_"
-
-    if engine == "torch":
-        predictor = torch_predictor(device, model_type)
-    else:
-        predictor = onnx_predictor(device, model_type)
+    predictor = get_predictor(device, model_type, engine)
 
     predictor.set_image(image)
-    input_point = np.array([[500, 375]])
-    input_label = np.array([1])
+    prefix = f"sam2_demo_{engine}_"
 
     #  The model returns masks, quality predictions for those masks,
     #     and low resolution mask logits that can be passed to the next iteration of prediction.
@@ -137,6 +122,9 @@ def run_demo(model_type="sam2_hiera_large", engine="torch"):
     #     scores gives the model's own estimation of the quality of these masks.
     #  For ambiguous prompts such as a single point, it is recommended to use multimask_output=True
     #     even if only a single mask is desired;
+    """
+    input_point = np.array([[500, 375]])
+    input_label = np.array([1])
     masks, scores, logits = predictor.predict(
         point_coords=input_point,
         point_labels=input_label,
@@ -195,6 +183,7 @@ def run_demo(model_type="sam2_hiera_large", engine="torch"):
         input_labels=input_label,
         output_image_file_prefix=prefix + "background_point",
     )
+    """
 
     # take a box as input
     input_box = np.array([425, 600, 700, 875])
@@ -206,6 +195,7 @@ def run_demo(model_type="sam2_hiera_large", engine="torch"):
     )
     show_masks(image, masks, scores, box_coords=input_box, output_image_file_prefix=prefix + "box")
 
+    """
     # Combining points and boxes
     input_box = np.array([425, 600, 700, 875])
     input_point = np.array([[575, 750]])
@@ -251,10 +241,11 @@ def run_demo(model_type="sam2_hiera_large", engine="torch"):
     plt.axis("off")
     plt.show()
     plt.savefig(prefix + "batch_prompt.png")
-
+    """
 
 if __name__ == "__main__":
     model_type = "sam2_hiera_large"
-    with torch.autocast("cuda", dtype=torch.bfloat16):
-        # run_demo(model_type, engine="torch")
+    #with torch.autocast("cuda", dtype=torch.bfloat16):
+    with torch.autocast("cuda"):
+        run_demo(model_type, engine="torch")
         run_demo(model_type, engine="ort")

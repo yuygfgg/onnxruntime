@@ -73,6 +73,7 @@ class SAM2ImageDecoder(nn.Module):
         multimask_output: bool,
         dynamic_multimask_via_stability: bool = True,
         output_low_res_masks: bool = True,
+        support_mask_input: bool = True,
     ) -> None:
         super().__init__()
         self.mask_decoder = sam_model.sam_mask_decoder
@@ -81,6 +82,7 @@ class SAM2ImageDecoder(nn.Module):
         self.multimask_output = multimask_output
         self.dynamic_multimask_via_stability = dynamic_multimask_via_stability
         self.output_low_res_masks = output_low_res_masks
+        self.support_mask_input = support_mask_input
 
     @torch.no_grad()
     def forward(
@@ -91,6 +93,7 @@ class SAM2ImageDecoder(nn.Module):
         point_coords: torch.Tensor,
         point_labels: torch.Tensor,
         input_masks: Optional[torch.Tensor] = None,
+        has_input_masks: Optional[torch.Tensor] = None,
     ):
         """Decode masks from image features and prompts.
 
@@ -107,22 +110,41 @@ class SAM2ImageDecoder(nn.Module):
                                          coordinate in (x, y) format of the P input points.
             point_labels (torch.Tensor): shape [B, P] and int32 dtype, where 1 means
                                          positive (foreground), 0 means negative (background), and -1 means padding.
-            input_masks (torch.Tensor, optional): [B, 1, H/4, W/4]. Low resolution mask input to the model.
+            input_masks (torch.Tensor): [B, 1, H/4, W/4]. Low resolution mask input to the model.
                                         Typically coming from a previous iteration.
+            has_input_masks (torch.Tensor): [B]. 1.0 if input_masks is used, 0.0 otherwise.
         Returns:
             masks (torch.Tensor): [B, M, H, W] where M=3 or 1. masks of image_size.
             iou_predictions (torch.Tensor): [B, M]. scores for M masks.
             low_res_masks (torch.Tensor, optional): [B, M, H/4, W/4]. low resolution masks.
         """
+        print("image_features_0.shape", image_features_0.shape)
+        print("image_features_1.shape", image_features_1.shape)
+        print("image_embeddings.shape", image_embeddings.shape)
+        print("point_coords.shape", point_coords.shape)
+        print("point_labels.shape", point_labels.shape)
+
+        if input_masks is not None:
+            print("input_masks.shape", input_masks.shape)
+        else:
+            print("input_masks is None")
+
+        if has_input_masks is not None:
+            print("has_input_masks.shape", has_input_masks.shape)
+        else:
+            print("has_input_masks is None")
+
         # Boxes shall be converted and concanetate with points, see sam2_image_onnx_predictor.py for details.
-        boxes = None
-        sparse_embeddings = self.prompt_encoder._embed_points(point_coords, point_labels, pad=(boxes is None))
+        #boxes = None
+        #sparse_embeddings = self.prompt_encoder._embed_points(point_coords, point_labels, pad=(boxes is None))
+        sparse_embeddings = self.embed_points(point_coords, point_labels)
+        dense_embeddings = self.embed_masks_v2(input_masks, has_input_masks)
         low_res_masks, iou_predictions, _, _ = self.mask_decoder.predict_masks(
             image_embeddings=image_embeddings,
             image_pe=self.prompt_encoder.get_dense_pe(),
             sparse_prompt_embeddings=sparse_embeddings,
-            dense_prompt_embeddings=self.embed_masks(input_masks),
-            repeat_image=False,
+            dense_prompt_embeddings=dense_embeddings,
+            repeat_image=sparse_embeddings.shape[0] > 1, # batch mode
             high_res_features=[image_features_0, image_features_1],
         )
 
@@ -140,6 +162,10 @@ class SAM2ImageDecoder(nn.Module):
             low_res_masks = low_res_masks[:, 0:1, :, :]
             iou_predictions = iou_predictions[:, 0:1]
 
+        if self.output_low_res_masks:
+            # low_res_masks = torch.clamp(low_res_masks, -32.0, 32.0)
+            return low_res_masks, iou_predictions
+
         # Compute the original image height and width, then interpolate the low resolution masks to the image size.
         masks = F.interpolate(
             low_res_masks,
@@ -147,27 +173,46 @@ class SAM2ImageDecoder(nn.Module):
             mode="bilinear",
             align_corners=False,
         )
+        return masks, iou_predictions
 
-        if self.output_low_res_masks:
-            low_res_masks = torch.clamp(low_res_masks, -32.0, 32.0)
-            return masks, iou_predictions, low_res_masks
-        else:
-            return masks, iou_predictions
+    def embed_points(self, point_coords: torch.Tensor, point_labels: torch.Tensor) -> torch.Tensor:
+        point_coords = point_coords + 0.5
 
-    def embed_masks(self, masks: Optional[torch.Tensor]) -> torch.Tensor:
+        padding_point = torch.zeros((point_coords.shape[0], 1, 2), device=point_coords.device)
+        padding_label = -torch.ones((point_labels.shape[0], 1), device=point_labels.device)
+        point_coords = torch.cat([point_coords, padding_point], dim=1)
+        point_labels = torch.cat([point_labels, padding_label], dim=1)
+
+        point_coords[:, :, 0] = point_coords[:, :, 0] / self.model.image_size
+        point_coords[:, :, 1] = point_coords[:, :, 1] / self.model.image_size
+
+        point_embedding = self.prompt_encoder.pe_layer._pe_encoding(point_coords)
+        point_labels = point_labels.unsqueeze(-1).expand_as(point_embedding)
+
+        point_embedding = point_embedding * (point_labels != -1)
+        point_embedding = point_embedding + self.prompt_encoder.not_a_point_embed.weight * (
+                point_labels == -1
+        )
+
+        for i in range(self.prompt_encoder.num_point_embeddings):
+            point_embedding = point_embedding + self.prompt_encoder.point_embeddings[i].weight * (point_labels == i)
+
+        return point_embedding
+
+    def embed_masks_v2(self, input_masks: torch.Tensor, has_input_masks: torch.Tensor) -> torch.Tensor:
         """
-        Embeds mask inputs. This function is not used in onnx export. It's used to demonstrate
-        how to prepare mask embeddings as input for onnx model.
-
         Args:
-            masks: shape [B, 1, 256, 256]. Low resolution mask input to the model,
-                   each has shape 1xHxW, where H=W=256. Typically coming from a previous iteration.
+            input_masks: shape [B, 1, 256, 256].
+            has_input_masks: shape [B].
         """
-        if masks is None:
-            return self.prompt_encoder.no_mask_embed.weight.reshape(1, -1, 1, 1)
+        if self.support_mask_input:
+            # It is a trade-off between performance and flexibility.
+            mask_embedding = has_input_masks * self.prompt_encoder.mask_downscaling(input_masks) + \
+                        (1.0 - has_input_masks) * self.prompt_encoder.no_mask_embed.weight.reshape(1, -1, 1, 1)
         else:
-            return self.prompt_encoder.mask_downscaling(masks)
+            mask_embedding = self.prompt_encoder.no_mask_embed.weight.reshape(1, -1, 1, 1)
 
+        return mask_embedding
 
 def get_model_cfg(model_type):
     assert model_type in ["sam2_hiera_tiny", "sam2_hiera_small", "sam2_hiera_large", "sam2_hiera_base_plus"]
@@ -234,8 +279,8 @@ def export_encoder_onnx(
 def export_decoder_onnx(
     model_type,
     multimask_output=False,
-    has_mask_input=False,
-    output_low_res_masks=False,
+    support_mask_input=False,
+    output_low_res_masks=True,
     dynamic_batch_axes=True,  # Set to False will force batch size to be 1.
     verbose=True,
 ):
@@ -255,30 +300,31 @@ def export_decoder_onnx(
 
     # Enable output_low_res_masks, and run an example inputs to get low resolution masks.
     sam2_decoder = SAM2ImageDecoder(
-        sam2_model, multimask_output=multimask_output, dynamic_multimask_via_stability=True, output_low_res_masks=True
+        sam2_model,
+        multimask_output=multimask_output,
+        dynamic_multimask_via_stability=True,
+        output_low_res_masks=output_low_res_masks,
+        support_mask_input=support_mask_input,
     ).cpu()
 
     point_coords = torch.randint(low=0, high=min(image_height, image_width), size=(batch_size, 5, 2), dtype=torch.float)
     point_labels = torch.randint(low=0, high=1, size=(batch_size, 5), dtype=torch.float)
-    input_masks = None
-
-    masks, scores, low_res_masks = sam2_decoder(
+    input_masks =  torch.zeros(batch_size, 1, image_height // 4, image_width // 4, dtype=torch.float)
+    has_input_masks = torch.ones(batch_size, dtype=torch.float)
+    low_res_masks, iou_predictions  = sam2_decoder(
         image_features_0,
         image_features_1,
         image_embeddings,
         point_coords,
         point_labels,
         input_masks,
+        has_input_masks
     )
 
     if verbose:
-        print("masks.shape", masks.shape)
-        print("scores.shape", scores.shape)
+        #print("masks.shape", masks.shape)
+        print("iou_predictions.shape", iou_predictions.shape)
         print("low_res_masks.shape", low_res_masks.shape)
-
-    if has_mask_input:
-        # When mulitmask_output is True, we only use the first low_res_masks for input_masks.
-        input_masks = low_res_masks[:, 0:1, :, :]
 
     example_inputs = (
         image_features_0,
@@ -287,6 +333,7 @@ def export_decoder_onnx(
         point_coords,
         point_labels,
         input_masks,
+        has_input_masks
     )
 
     input_names = [
@@ -296,22 +343,24 @@ def export_decoder_onnx(
         "point_coords",
         "point_labels",
         "input_masks",
+        "has_input_masks",
     ]
 
-    if not has_mask_input:
-        example_inputs = example_inputs[:-1]
-        input_names = input_names[:-1]
+    if not support_mask_input:
+        example_inputs = example_inputs[:-2]
+        input_names = input_names[:-2]
 
-    output_names = ["masks", "scores"]
     if output_low_res_masks:
-        output_names.append("low_res_masks")
+        output_names = ["low_res_masks", "iou_predictions"]
+    else:
+        output_names = ["masks", "iou_predictions"]
 
     sam2_decoder.output_low_res_masks = output_low_res_masks
 
     onnx_model_path = (
         f"{model_type}_decoder"
-        + ("_mask_in" if has_mask_input else "")
-        + ("_multi_out" if multimask_output else "")
+        + ("_no-mask-in" if not support_mask_input else "")
+        + ("_multi-mask-out" if multimask_output else "")
         + ".onnx"
     )
 
@@ -327,6 +376,7 @@ def export_decoder_onnx(
             "point_coords": {0: "batch_size", 1: "num_points"},
             "point_labels": {0: "batch_size", 1: "num_points"},
             "input_masks": {0: "batch_size"},
+            "has_input_masks": {0: "batch_size"},
             "masks": {0: "batch_size"},
             "iou_predictions": {0: "batch_size"},
             "low_res_masks": {0: "batch_size"},
@@ -351,10 +401,10 @@ def main():
     # Here we export all combinations. User can choose models based on application.
     # for model_type in ["sam2_hiera_tiny", "sam2_hiera_small", "sam2_hiera_large", "sam2_hiera_base_plus"]:
     for model_type in ["sam2_hiera_large"]:
-        # export_encoder_onnx(model_type)
+        export_encoder_onnx(model_type)
         for multimask_output in [False, True]:
-            for has_mask_input in [False, True]:
-                export_decoder_onnx(model_type, multimask_output=multimask_output, has_mask_input=has_mask_input)
+            for support_mask_input in [False, True]:
+                export_decoder_onnx(model_type, multimask_output=multimask_output, support_mask_input=support_mask_input)
 
 
 if __name__ == "__main__":

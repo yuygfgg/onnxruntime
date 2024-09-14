@@ -7,17 +7,17 @@
 
 import logging
 from typing import Optional, Tuple, Union
-
+import os
 import numpy as np
 import torch
 from PIL.Image import Image
-from sam2 import SAM2ImagePredictor
+from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.modeling.sam2_base import SAM2Base
 from sam2.utils.transforms import SAM2Transforms
 
 from onnxruntime import InferenceSession
 from onnxruntime.transformers.io_binding_helper import CudaSession
-
+from convert_to_onnx import SAM2ImageDecoder
 
 def create_ort_session(
     onnx_path: str,
@@ -35,18 +35,36 @@ def create_ort_session(
         providers = [(provider, provider_options), "CPUExecutionProvider"]
     else:
         providers = ["CPUExecutionProvider"]
-
+    print(f"Using providers: {providers}")
     return InferenceSession(onnx_path, session_options, providers=providers)
 
 
-def shape_dict(batch_size: int, height: int, width: int):
+def encoder_shape_dict(batch_size: int, height: int, width: int):
+    assert height == 1024 and width == 1024, "Only 1024x1024 images are supported."
     return {
         "image": [batch_size, 3, height, width],
-        "high_res_feats_0": [batch_size, 32, height // 4, width // 4],
-        "high_res_feats_1": [batch_size, 64, height // 8, width // 8],
+
+        "image_features_0": [batch_size, 32, height // 4, width // 4],
+        "image_features_1": [batch_size, 64, height // 8, width // 8],
         "image_embeddings": [batch_size, 256, height // 16, width // 16],
     }
 
+
+def decoder_shape_dict(batch_size: int, height: int=1024, width: int=1024, max_points:int=16, num_masks:int=1):
+    assert height == 1024 and width == 1024, "Only 1024x1024 images are supported."
+    return {
+        "image_features_0": [batch_size, 32, height // 4, width // 4],
+        "image_features_1": [batch_size, 64, height // 8, width // 8],
+        "image_embeddings": [batch_size, 256, height // 16, width // 16],
+        "point_coords": [batch_size, max_points, 2],
+        "point_labels": [batch_size, max_points],
+        "input_masks": [batch_size, 1, height // 4, width // 4],
+        "has_input_masks": [batch_size],
+
+        "masks": [batch_size, num_masks, height, width],
+        "iou_predictions": [batch_size, num_masks],
+        "low_res_masks": [batch_size, num_masks, height // 4, width // 4],
+    }
 
 def create_session(
     onnx_path: str, session_options=None, provider="CUDAExecutionProvider", device="cuda", enable_cuda_graph=False
@@ -62,7 +80,8 @@ class SAM2ImageOnnxPredictor(SAM2ImagePredictor):
     def __init__(
         self,
         sam_model: SAM2Base,
-        encoder_onnx_path: str,
+        onnx_directory: str = ".",
+        model_type:str = "sam2_hiera_large",
         onnx_dtype: torch.dtype = torch.float32,
         mask_threshold=0.0,
         max_hole_area=0.0,
@@ -74,7 +93,7 @@ class SAM2ImageOnnxPredictor(SAM2ImagePredictor):
 
         Arguments:
           sam_model (SAM2Base): The model to use for mask prediction.
-          encoder_onnx_path (str): The path to the encoder ONNX model.
+          onnx_directory (str): The path of the directory that contains encoder and decoder onnx models.
           onnx_dtype (torch.dtype): The data type to use for ONNX inputs.
           mask_threshold (float): The threshold to convert mask logits to binary masks. Default is 0.0.
           max_hole_area (float): If max_hole_area > 0, we fill small holes in up to
@@ -82,33 +101,73 @@ class SAM2ImageOnnxPredictor(SAM2ImagePredictor):
           max_sprinkle_area (float): If max_sprinkle_area > 0, we remove small sprinkles up to
                                      the maximum area of max_sprinkle_area in low_res_masks.
         """
-        super().__init__()
-        self.model = sam_model
-        self._transforms = SAM2Transforms(
-            resolution=self.model.image_size,
-            mask_threshold=mask_threshold,
-            max_hole_area=max_hole_area,
-            max_sprinkle_area=max_sprinkle_area,
-        )
+        super().__init__(sam_model,
+                         mask_threshold=mask_threshold,
+                         max_hole_area=max_hole_area,
+                         max_sprinkle_area=max_sprinkle_area)
 
-        # Predictor state
-        self._is_image_set = False
-        self._features = None
-        self._orig_hw = None
-        # Whether the predictor is set for single image or a batch of images
-        self._is_batch = False
+        print(self.device)
 
-        # Predictor config
-        self.mask_threshold = mask_threshold
-
+        # These onnx models shall be exported by convert_to_onnx.py in advance.
+        onnx_path = os.path.join(onnx_directory, f"{model_type}_encoder.onnx")
         self.encoder_session = create_session(
-            encoder_onnx_path,
+            onnx_path,
             session_options=None,
             provider="CUDAExecutionProvider",
             device="cuda",
             enable_cuda_graph=False,
         )
         self.onnx_dtype = onnx_dtype
+
+        # This is the torch class used in onnx export. We use it to compare with onnx runtime output.
+        self.sam2_decoder = SAM2ImageDecoder(
+            sam_model, multimask_output=False, dynamic_multimask_via_stability=True, output_low_res_masks=True,
+            support_mask_input=True
+        ).to(self.device)
+
+        # Support input mask, only one mask output
+        # provider = "CUDAExecutionProvider"
+        # device = "cuda"
+        provider = "CPUExecutionProvider"
+        device = "cpu"
+        onnx_path = os.path.join(onnx_directory, f"{model_type}_decoder.onnx")
+        self.decoder_session = create_session(
+            onnx_path,
+            session_options=None,
+            provider=provider,
+            device=device,
+            enable_cuda_graph=False,
+        )
+
+        # No input mask, only one mask output
+        # onnx_path = os.path.join(onnx_directory, f"{model_type}_decoder_no-mask-in.onnx")
+        # self.decoder_session_no_input_mask = create_session(
+        #     onnx_path,
+        #     session_options=None,
+        #     provider="CUDAExecutionProvider",
+        #     device="cuda",
+        #     enable_cuda_graph=False,
+        # )
+
+        # Support input mask, 3 masks output
+        onnx_path = os.path.join(onnx_directory, f"{model_type}_decoder_multi-mask-out.onnx")
+        self.decoder_session_multi_out = create_session(
+            onnx_path,
+            session_options=None,
+            provider=provider,
+            device=device,
+            enable_cuda_graph=False,
+        )
+
+        # No input mask, 3 masks output
+        # onnx_path = os.path.join(onnx_directory, f"{model_type}_decoder_no-mask-in_multi-mask-out.onnx")
+        # self.decoder_session_no_input_mask_multi_out = create_session(
+        #     onnx_path,
+        #     session_options=None,
+        #     provider="CUDAExecutionProvider",
+        #     device="cuda",
+        #     enable_cuda_graph=False,
+        # )
 
     @torch.no_grad()
     def set_image(self, image: Union[np.ndarray, Image]):
@@ -138,15 +197,20 @@ class SAM2ImageOnnxPredictor(SAM2ImagePredictor):
         ), f"input_image must be of size 1x3xHxW, got {input_image.shape}"
 
         # Computing image embeddings for the provided image
-        io_shapes = shape_dict(batch_size=1, height=input_image.shape[2], width=input_image.shape[3])
+        io_shapes = encoder_shape_dict(batch_size=1, height=input_image.shape[2], width=input_image.shape[3])
         self.encoder_session.allocate_buffers(io_shapes)
 
-        feed_dict = {"image": input_image.to(self.onnx_dtype)}
+        feed_dict = { "image": input_image.to(self.onnx_dtype).to(self.device) }
+
+        for key, value in feed_dict.items():
+            print(f"{key}: {value.shape}, {value.dtype}")
+        print(self.encoder_session.ort_session._model_path)
+
         ort_outputs = self.encoder_session.infer(feed_dict)
 
         self._features = {
             "image_embed": ort_outputs["image_embeddings"],
-            "high_res_feats": [ort_outputs[f"high_res_feats_{i}"] for i in range(2)],
+            "high_res_feats": [ort_outputs[f"image_features_{i}"] for i in range(2)],
         }
         self._is_image_set = True
         logging.info("Image embeddings computed.")
@@ -318,29 +382,85 @@ class SAM2ImageOnnxPredictor(SAM2ImagePredictor):
             else:
                 concat_points = (box_coords, box_labels)
 
-        # TODO: replace with onnx runtime
-        sparse_embeddings, dense_embeddings = self.model.sam_prompt_encoder(
-            points=concat_points,
-            boxes=None,
-            masks=mask_input,
+        batch_size = concat_points[0].shape[0]
+        shape_dict = decoder_shape_dict(batch_size=batch_size, num_masks=3 if multimask_output else 1)
+        # if mask_input is None:
+        #     del shape_dict["input_masks"]
+        #     del shape_dict["has_input_masks"]
+
+        # if multimask_output:
+        #     decoder_session = self.decoder_session_no_input_mask_multi_out if mask_input is None else self.decoder_session_multi_out
+        # else:
+        #     decoder_session = self.decoder_session_no_input_mask if mask_input is None else self.decoder_session
+        if multimask_output:
+            decoder_session = self.decoder_session_multi_out
+        else:
+            decoder_session = self.decoder_session
+
+        decoder_session.allocate_buffers(shape_dict)
+
+        image_features_0 = self._features["high_res_feats"][0][img_idx].unsqueeze(0)
+        image_features_1 = self._features["high_res_feats"][1][img_idx].unsqueeze(0)
+        image_embeddings = self._features["image_embed"][img_idx].unsqueeze(0)
+
+        if mask_input is None:
+            input_masks = torch.zeros(1, 1, 256, 256, dtype=torch.float, device=self.device)
+            has_input_masks = torch.zeros(1, dtype=torch.float, device=self.device)
+        else:
+            input_masks = mask_input[img_idx].unsqueeze(0)
+            has_input_masks = torch.ones(1, dtype=torch.float, device=self.device)
+
+        # This is the torch one used in onnx export.
+        self.sam2_decoder.multimask_output = multimask_output
+        torch_low_res_masks, torch_iou_predictions  = self.sam2_decoder(
+            image_features_0.clone(),
+            image_features_1.clone(),
+            image_embeddings.clone(),
+            concat_points[0].clone(),
+            concat_points[1].clone(),
+            input_masks.clone(),
+            has_input_masks.clone()
         )
 
-        # Predict masks
-        batched_mode = concat_points is not None and concat_points[0].shape[0] > 1  # multi object prediction
-        high_res_features = [feat_level[img_idx].unsqueeze(0) for feat_level in self._features["high_res_feats"]]
-        low_res_masks, iou_predictions, _, _ = self.model.sam_mask_decoder(
-            image_embeddings=self._features["image_embed"][img_idx].unsqueeze(0),
-            image_pe=self.model.sam_prompt_encoder.get_dense_pe(),
-            sparse_prompt_embeddings=sparse_embeddings,
-            dense_prompt_embeddings=dense_embeddings,
-            multimask_output=multimask_output,
-            repeat_image=batched_mode,
-            high_res_features=high_res_features,
-        )
+        # "high_res_feats_0": [batch_size, 32, height // 4, width // 4],
+        # "high_res_feats_1": [batch_size, 64, height // 8, width // 8],
+        # "image_embeddings": [batch_size, 256, height // 16, width // 16],
+        # "point_coords": [batch_size, max_points, 2],
+        # "point_labels": [batch_size, max_points],
+        # "input_masks": [batch_size, 1, height // 4, width // 4],
+        device = "cpu"
+        feed_dict = {"image_embeddings": image_embeddings.to(device),
+                     "image_features_0": image_features_0.to(device),
+                     "image_features_1": image_features_1.to(device),
+                     "point_coords": concat_points[0].to(device),
+                     "point_labels": concat_points[1].to(device),
+                     "input_masks": input_masks.to(device),
+                     "has_input_masks": has_input_masks.to(device),
+        }
+        # if mask_input is None:
+        #     del feed_dict["input_masks"]
+        #     del feed_dict["has_input_masks"]
+
+        # "masks": [batch_size, num_masks, height, width],
+        # "iou_predictions": [batch_size, num_masks, height // 4, width // 4],
+        # "low_res_masks": [batch_size, num_masks, height // 4, width // 4],
+        for key, value in feed_dict.items():
+            print(f"{key}: {value.shape}, {value.dtype}")
+        print(self.encoder_session.ort_session._model_path)
+
+        ort_outputs = decoder_session.infer(feed_dict)
+        print(ort_outputs)
+        #masks = ort_outputs["masks"]
+        iou_predictions = ort_outputs["iou_predictions"]
+        low_res_masks = ort_outputs["low_res_masks"]
+        # torch.testing.assert_close(masks, torch_masks.to(device), atol=1e-3, rtol=1e-3)
+        #torch.testing.assert_close(iou_predictions, torch_iou_predictions.to(device), atol=1e-3, rtol=1e-3)
+        #torch.testing.assert_close(low_res_masks, torch_low_res_masks.to(device), atol=1e-3, rtol=1e-3)
 
         # Upscale the masks to the original image resolution
         masks = self._transforms.postprocess_masks(low_res_masks, self._orig_hw[img_idx])
         low_res_masks = torch.clamp(low_res_masks, -32.0, 32.0)
+
         if not return_logits:
             masks = masks > self.mask_threshold
 
