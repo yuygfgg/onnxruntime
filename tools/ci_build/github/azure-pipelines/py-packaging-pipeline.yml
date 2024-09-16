@@ -346,14 +346,14 @@ extends:
     - stage: Python_Packaging_Linux_CPU
       dependsOn: []
       jobs:
-      - template: py-linux.yml
+      - template: /tools/ci_build/github/azure-pipelines/templates/py-linux.yml@self
         parameters:
           arch: 'x86_64'
           machine_pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
           extra_build_arg: ${{ parameters.build_py_parameters }}
           cmake_build_type: ${{ parameters.cmake_build_type }}
           
-    - template: py-linux-gpu.yml
+    - template: /tools/ci_build/github/azure-pipelines/templates/py-linux-gpu.yml@self
       parameters:
         arch: 'x86_64'
         machine_pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
