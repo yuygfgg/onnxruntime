@@ -45,7 +45,7 @@ jobs:
           targetPathPattern: '+:file|$(Build.ArtifactStagingDirectory)\**\*.pyd;+:file|$(Build.ArtifactStagingDirectory)\**\*.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
       outputs:
       - output: pipelineArtifact
-        targetPath: $(Build.ArtifactStagingDirectory)
+        targetPath: $(Build.BinariesDirectory)/dist
         artifactName: linux_cpu_wheel_${{ parameters.arch }}
   variables:
     # The build machine pool doesn't have dotnet, so it can't run CG.
@@ -100,9 +100,9 @@ jobs:
 
 
     - script: |
-          mv $(Build.BinariesDirectory)/${{ parameters.cmake_build_type }} $(Build.BinariesDirectory)/dist
+        mv $(Build.BinariesDirectory)/${{ parameters.cmake_build_type }} $(Build.BinariesDirectory)/dist
       workingDirectory: '$(Build.ArtifactStagingDirectory)'
-      displayName: 'unzip the package'
+      displayName: 'Move files'
 
     - template: component-governance-component-detection-steps.yml
       parameters :
