@@ -62,10 +62,26 @@ stages:
         clean: all
       pool:
         name: onnxruntime-Win-CPU-2022
+        os: windows
       variables:
         GRADLE_OPTS: '-Dorg.gradle.daemon=false'
         VSGenerator: 'Visual Studio 17 2022'
         CUDA_MODULE_LOADING: 'LAZY'
+      templateContext:
+        codeSignValidation:
+            enabled: true
+            break: true
+        psscriptanalyzer:
+            enabled: true
+        sdl:
+            binskim:
+              enabled: true
+              scanOutputDirectoryOnly: true
+              targetPathPattern: '+:file|$(Build.ArtifactStagingDirectory)\**\*.pyd;+:file|$(Build.ArtifactStagingDirectory)\**\*.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
+        outputs:
+        - output: pipelineArtifact
+          targetPath: $(Build.ArtifactStagingDirectory)
+          artifactName: win_${{ parameters.EP_NAME }}_wheel_${{ parameters.PYTHON_VERSION }}
       steps:
           - task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
             displayName: 'Clean Agent Directories'
@@ -174,11 +190,6 @@ stages:
               Contents: '*.whl'
               TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
-          - task: PublishBuildArtifacts@1
-            displayName: 'Publish Artifact: ONNXRuntime python wheel'
-            inputs:
-              ArtifactName: onnxruntime_${{ parameters.EP_NAME }}
-
           - ${{ if eq(parameters.publish_symbols, true) }}:
             - task: PublishSymbols@2
               displayName: 'Publish symbols'
@@ -197,24 +208,6 @@ stages:
               7z x *.whl
             workingDirectory: '$(Build.ArtifactStagingDirectory)'
             displayName: 'unzip the package'
-
-          - task: CredScan@3
-            displayName: 'Run CredScan'
-            inputs:
-              debugMode: false
-            continueOnError: true
-
-          - task: BinSkim@4
-            displayName: 'Run BinSkim'
-            inputs:
-              AnalyzeTargetGlob: '+:file|$(Build.ArtifactStagingDirectory)\**\*.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
-
-          - task: TSAUpload@2
-            displayName: 'TSA upload'
-            condition: and (succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
-            inputs:
-              GdnPublishTsaOnboard: false
-              GdnPublishTsaConfigFile: '$(Build.sourcesDirectory)\.gdn\.gdntsa'
 
           - template: component-governance-component-detection-steps.yml
             parameters:
@@ -245,7 +238,7 @@ stages:
 
         - template: flex-downloadPipelineArtifact.yml
           parameters:
-            ArtifactName: onnxruntime_${{ parameters.EP_NAME }}
+            ArtifactName: win_${{ parameters.EP_NAME }}_wheel_${{ parameters.PYTHON_VERSION }}
             StepName: 'Download Pipeline Artifact - Windows GPU Build'
             TargetPath: '$(Build.ArtifactStagingDirectory)'
             SpecificArtifact: ${{ parameters.SpecificArtifact }}
