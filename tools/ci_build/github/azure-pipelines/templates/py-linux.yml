@@ -31,7 +31,9 @@ jobs:
   timeoutInMinutes: 240
   workspace:
     clean: all
-  pool: ${{ parameters.machine_pool }}
+  pool: 
+    name: ${{ parameters.machine_pool }}
+    os: linux
   templateContext:
       codeSignValidation:
         enabled: true
