@@ -352,7 +352,17 @@ extends:
           machine_pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
           extra_build_arg: ${{ parameters.build_py_parameters }}
           cmake_build_type: ${{ parameters.cmake_build_type }}
-          
+
+    - stage: Python_Packaging_Linux_ARM
+      dependsOn: []
+      jobs:
+      - template: /tools/ci_build/github/azure-pipelines/templates/py-linux.yml@self
+        parameters:
+          arch: 'aarch64'
+          machine_pool: 'onnxruntime-linux-ARM64-CPU-2019'
+          extra_build_arg: ${{ parameters.build_py_parameters }}
+          cmake_build_type: ${{ parameters.cmake_build_type }}
+       
     - template: /tools/ci_build/github/azure-pipelines/templates/py-linux-gpu.yml@self
       parameters:
         arch: 'x86_64'
