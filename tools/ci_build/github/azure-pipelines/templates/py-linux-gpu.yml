@@ -54,10 +54,10 @@ stages:
         binskim:
           enabled: true
           scanOutputDirectoryOnly: true
-          targetPathPattern: '+:file|$(Build.ArtifactStagingDirectory)\**\*.pyd;+:file|$(Build.ArtifactStagingDirectory)\**\*.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
+          targetPathPattern: '+:file|$(Build.ArtifactStagingDirectory)\**\*.so'
       outputs:
       - output: pipelineArtifact
-        targetPath: $(Build.BinariesDirectory)/dist
+        targetPath: $(Build.ArtifactStagingDirectory)
         artifactName: linux_gpu_wheel_${{ parameters.arch }}
     variables:
       # The build machine pool doesn't have dotnet, so it can't run CG.
@@ -91,7 +91,7 @@ stages:
           arguments: -i onnxruntimecuda${{ replace(parameters.cuda_version, '.', '') }}xtrt86build${{ parameters.arch }} -d "GPU" -c ${{ parameters.cmake_build_type }} $(extra_build_args)
 
       - script: |
-          mv $(Build.BinariesDirectory)/${{ parameters.cmake_build_type }} $(Build.BinariesDirectory)/dist
+          mv $(Build.BinariesDirectory)/${{ parameters.cmake_build_type }} $(Build.BinariesDirectory)/dist .
         workingDirectory: '$(Build.ArtifactStagingDirectory)'
         displayName: 'Move files'
 

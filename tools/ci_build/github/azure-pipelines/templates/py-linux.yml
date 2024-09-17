@@ -44,10 +44,10 @@ jobs:
         binskim:
           enabled: true
           scanOutputDirectoryOnly: true
-          targetPathPattern: '+:file|$(Build.ArtifactStagingDirectory)\**\*.pyd;+:file|$(Build.ArtifactStagingDirectory)\**\*.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
+          targetPathPattern: '+:file|$(Build.ArtifactStagingDirectory)\**\*.so'
       outputs:
       - output: pipelineArtifact
-        targetPath: $(Build.BinariesDirectory)/dist
+        targetPath: $(Build.ArtifactStagingDirectory)
         artifactName: linux_cpu_wheel_${{ parameters.arch }}
   variables:
     # The build machine pool doesn't have dotnet, so it can't run CG.
@@ -102,7 +102,7 @@ jobs:
 
 
     - script: |
-        mv $(Build.BinariesDirectory)/${{ parameters.cmake_build_type }} $(Build.BinariesDirectory)/dist
+        mv $(Build.BinariesDirectory)/${{ parameters.cmake_build_type }} $(Build.BinariesDirectory)/dist .
       workingDirectory: '$(Build.ArtifactStagingDirectory)'
       displayName: 'Move files'
 
