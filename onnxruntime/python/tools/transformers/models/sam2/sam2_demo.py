@@ -2,24 +2,14 @@
 # Copyright (R) Microsoft Corporation.  All rights reserved.
 # Licensed under the MIT License.
 # --------------------------------------------------------------------------
-#
-# pip install opencv-python matplotlib
-# pip install 'git+https://github.com/facebookresearch/segment-anything-2.git'
-# wget https://raw.githubusercontent.com/facebookresearch/segment-anything-2/main/notebooks/images/truck.jpg
-# wget https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_large.pt
-# wget https://raw.githubusercontent.com/facebookresearch/segment-anything-2/main/sam2_configs/sam2_hiera_l.yaml
-# python -m onnxruntime.transformers.models.sam2.convert_to_onnx
-# python -m onnxruntime.transformers.models.sam2.sam2_demo
-
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from convert_to_onnx import get_model_cfg
 from matplotlib.patches import Rectangle
 from PIL import Image
-from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2_image_onnx_predictor import SAM2ImageOnnxPredictor
+from sam2_utils import build_sam2_model
 
 
 def show_mask(mask, ax, random_color=False, borders=True):
@@ -85,17 +75,17 @@ def show_masks(
             plt.savefig(f"{output_image_file_prefix}_{i}.png")
 
 
-def get_predictor(device, model_type="sam2_hiera_large", engine="torch"):
-    sam2_checkpoint = f"{model_type}.pt"
-    model_cfg = get_model_cfg(model_type)
-    sam2_model = build_sam2(model_cfg, sam2_checkpoint, device=device)
+def get_predictor(checkpoint_dir:str, device:torch.device, model_type="sam2_hiera_large", engine="torch", onnx_directory="sam2_onnx_models"):
+    sam2_model = build_sam2_model(checkpoint_dir, model_type, device=device)
     if engine == "torch":
-       predictor = SAM2ImagePredictor(sam2_model)
+        predictor = SAM2ImagePredictor(sam2_model)
     else:
-       predictor = SAM2ImageOnnxPredictor(sam2_model, model_type=model_type)
+        predictor = SAM2ImageOnnxPredictor(sam2_model, onnx_directory=onnx_directory, model_type=model_type)
     return predictor
 
-def run_demo(model_type="sam2_hiera_large", engine="torch"):
+
+def run_demo(checkpoint_dir:str, model_type="sam2_hiera_large", engine="torch", onnx_directory="sam2_onnx_models",
+             enable_batch=False):
     if torch.cuda.is_available():
         device = torch.device("cuda")
     else:
@@ -111,7 +101,7 @@ def run_demo(model_type="sam2_hiera_large", engine="torch"):
     image = Image.open("truck.jpg")
     image = np.array(image.convert("RGB"))
 
-    predictor = get_predictor(device, model_type, engine)
+    predictor = get_predictor(checkpoint_dir, device, model_type, engine, onnx_directory=onnx_directory)
 
     predictor.set_image(image)
     prefix = f"sam2_demo_{engine}_"
@@ -122,7 +112,6 @@ def run_demo(model_type="sam2_hiera_large", engine="torch"):
     #     scores gives the model's own estimation of the quality of these masks.
     #  For ambiguous prompts such as a single point, it is recommended to use multimask_output=True
     #     even if only a single mask is desired;
-    """
     input_point = np.array([[500, 375]])
     input_label = np.array([1])
     masks, scores, logits = predictor.predict(
@@ -146,7 +135,7 @@ def run_demo(model_type="sam2_hiera_large", engine="torch"):
         output_image_file_prefix=prefix + "multimask",
     )
 
-    # multiple points
+    # Multiple points.
     input_point = np.array([[500, 375], [1125, 625]])
     input_label = np.array([1, 1])
     mask_input = logits[np.argmax(scores), :, :]  # Choose the model's best mask
@@ -165,7 +154,7 @@ def run_demo(model_type="sam2_hiera_large", engine="torch"):
         output_image_file_prefix=prefix + "multi_points",
     )
 
-    # specify just the window, a background point
+    # Specify a window and a background point.
     input_point = np.array([[500, 375], [1125, 625]])
     input_label = np.array([1, 0])
     mask_input = logits[np.argmax(scores), :, :]  # Choose the model's best mask
@@ -183,9 +172,8 @@ def run_demo(model_type="sam2_hiera_large", engine="torch"):
         input_labels=input_label,
         output_image_file_prefix=prefix + "background_point",
     )
-    """
 
-    # take a box as input
+    # Take a box as input
     input_box = np.array([425, 600, 700, 875])
     masks, scores, _ = predictor.predict(
         point_coords=None,
@@ -195,7 +183,6 @@ def run_demo(model_type="sam2_hiera_large", engine="torch"):
     )
     show_masks(image, masks, scores, box_coords=input_box, output_image_file_prefix=prefix + "box")
 
-    """
     # Combining points and boxes
     input_box = np.array([425, 600, 700, 875])
     input_point = np.array([[575, 750]])
@@ -217,35 +204,28 @@ def run_demo(model_type="sam2_hiera_large", engine="torch"):
         output_image_file_prefix=prefix + "box_and_point",
     )
 
-    # Batched prompt inputs
-    input_boxes = np.array(
-        [
-            [75, 275, 1725, 850],
-            [425, 600, 700, 875],
-            [1375, 550, 1650, 800],
-            [1240, 675, 1400, 750],
-        ]
-    )
-    masks, scores, _ = predictor.predict(
-        point_coords=None,
-        point_labels=None,
-        box=input_boxes,
-        multimask_output=False,
-    )
-    plt.figure(figsize=(10, 10))
-    plt.imshow(image)
-    for mask in masks:
-        show_mask(mask.squeeze(0), plt.gca(), random_color=True)
-    for box in input_boxes:
-        show_box(box, plt.gca())
-    plt.axis("off")
-    plt.show()
-    plt.savefig(prefix + "batch_prompt.png")
-    """
-
-if __name__ == "__main__":
-    model_type = "sam2_hiera_large"
-    #with torch.autocast("cuda", dtype=torch.bfloat16):
-    with torch.autocast("cuda"):
-        run_demo(model_type, engine="torch")
-        run_demo(model_type, engine="ort")
+    # TODO: support batched prompt inputs
+    if enable_batch:
+        input_boxes = np.array(
+            [
+                [75, 275, 1725, 850],
+                [425, 600, 700, 875],
+                [1375, 550, 1650, 800],
+                [1240, 675, 1400, 750],
+            ]
+        )
+        masks, scores, _ = predictor.predict(
+            point_coords=None,
+            point_labels=None,
+            box=input_boxes,
+            multimask_output=False,
+        )
+        plt.figure(figsize=(10, 10))
+        plt.imshow(image)
+        for mask in masks:
+            show_mask(mask.squeeze(0), plt.gca(), random_color=True)
+        for box in input_boxes:
+            show_box(box, plt.gca())
+        plt.axis("off")
+        plt.show()
+        plt.savefig(prefix + "batch_prompt.png")

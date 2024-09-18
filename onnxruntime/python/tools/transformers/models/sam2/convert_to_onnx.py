@@ -2,410 +2,204 @@
 # Copyright (R) Microsoft Corporation.  All rights reserved.
 # Licensed under the MIT License.
 # --------------------------------------------------------------------------
-# Example commands to export onnx:
+# Example commands to prepare environment:
 #   git clone https://github.com/facebookresearch/segment-anything-2.git
-#   cd segment-anything-2
 #   pip install -e .
 #   cd checkpoints
 #   sh ./download_ckpts.sh
-#   cd ..
-#   wget https://raw.githubusercontent.com/microsoft/onnxruntime/main/onnxruntime/python/tools/transformers/models/sam2/convert_to_onnx.py
-#   python convert_to_onnx.py
+#
+# Run script by specifying --sam2_dir with the segment-anything-2 directory created by the above git clone command:
+#   python convert_to_onnx.py  --sam2_dir path/to/segment-anything-2
 
-from typing import Any, Optional
+# Example commands to run demo:
+#   pip install opencv-python matplotlib
+#   wget https://raw.githubusercontent.com/facebookresearch/segment-anything-2/main/notebooks/images/truck.jpg
+#   python convert_to_onnx.py  --sam2_dir path/to/segment-anything-2 --demo
 
+import pathlib
+import sys
+import os
 import torch
-import torch.nn.functional as F
-from sam2.build_sam import build_sam2
-from sam2.modeling.sam2_base import SAM2Base
-from torch import nn
+import argparse
+from image_encoder import export_image_encoder_onnx, test_image_encoder_onnx
+from mask_decoder import export_mask_decoder_onnx, test_mask_decoder_onnx
+from prompt_encoder import export_prompt_encoder_onnx, test_prompt_encoder_onnx
+from image_decoder import export_decoder_onnx, test_decoder_onnx
+from sam2_utils import build_sam2_model, get_decoder_onnx_path, get_image_encoder_onnx_path, setup_logger
+from sam2_demo import run_demo
 
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Export SAM2 models to ONNX")
 
-class SAM2ImageEncoder(nn.Module):
-    def __init__(self, sam_model: SAM2Base) -> None:
-        super().__init__()
-        self.model = sam_model
-        self.image_encoder = sam_model.image_encoder
-        self.no_mem_embed = sam_model.no_mem_embed
-
-    def forward(self, x: torch.Tensor) -> tuple[Any, Any, Any]:
-        """
-        Encodes images into features.
-
-        Args:
-            x (torch.Tensor): images of shape [B, 3, H, W], B is batch size, H and W are height and width.
-
-        Returns:
-            image_features_0: image features of shape [B, 32, H/4, W/4] - high resolution features of level 0
-            image_features_1: image features of shape [B, 64, H/8, W/8] - high resolution features of level 1
-            image_embeddings: image features of shape [B, 256, H/16, W/16] - 16 is the backbone_stride
-        """
-        backbone_out = self.image_encoder(x)
-
-        # precompute projected level 0 and level 1 features in SAM decoder
-        # to avoid running it again on every SAM click
-        backbone_out["backbone_fpn"][0] = self.model.sam_mask_decoder.conv_s0(backbone_out["backbone_fpn"][0])
-        backbone_out["backbone_fpn"][1] = self.model.sam_mask_decoder.conv_s1(backbone_out["backbone_fpn"][1])
-
-        # Prepare and flatten visual features.
-        feature_maps = backbone_out["backbone_fpn"][-self.model.num_feature_levels :]
-        vision_pos_embeds = backbone_out["vision_pos_enc"][-self.model.num_feature_levels :]
-        feat_sizes = [(x.shape[-2], x.shape[-1]) for x in vision_pos_embeds]
-
-        # flatten NxCxHxW to HWxNxC
-        # TODO: we should avoid this transpose since it will be transposed back to NCHW later.
-        vision_feats = [x.flatten(2).permute(2, 0, 1) for x in feature_maps]
-
-        vision_feats[-1] = vision_feats[-1] + self.no_mem_embed
-
-        feats = [
-            feat.permute(1, 2, 0).reshape(1, -1, *feat_size)
-            for feat, feat_size in zip(vision_feats[::-1], feat_sizes[::-1])
-        ][::-1]
-
-        return feats[0], feats[1], feats[2]
-
-
-class SAM2ImageDecoder(nn.Module):
-    def __init__(
-        self,
-        sam_model: SAM2Base,
-        multimask_output: bool,
-        dynamic_multimask_via_stability: bool = True,
-        output_low_res_masks: bool = True,
-        support_mask_input: bool = True,
-    ) -> None:
-        super().__init__()
-        self.mask_decoder = sam_model.sam_mask_decoder
-        self.prompt_encoder = sam_model.sam_prompt_encoder
-        self.model = sam_model
-        self.multimask_output = multimask_output
-        self.dynamic_multimask_via_stability = dynamic_multimask_via_stability
-        self.output_low_res_masks = output_low_res_masks
-        self.support_mask_input = support_mask_input
-
-    @torch.no_grad()
-    def forward(
-        self,
-        image_features_0: torch.Tensor,
-        image_features_1: torch.Tensor,
-        image_embeddings: torch.Tensor,
-        point_coords: torch.Tensor,
-        point_labels: torch.Tensor,
-        input_masks: Optional[torch.Tensor] = None,
-        has_input_masks: Optional[torch.Tensor] = None,
-    ):
-        """Decode masks from image features and prompts.
-
-           Limitations:
-            (1) Only support image size HxW=1024x1024. If you want to use different image sizes like 512x512,
-                see https://github.com/facebookresearch/segment-anything-2/issues/138.
-            (2) Batched images are not supported.
-
-           Args:
-            image_features_0 (torch.Tensor): [B, 32, H/4, W/4]. high resolution features of level 0 from image encoder.
-            image_features_1 (torch.Tensor): [B, 64, H/8, W/8]. high resolution features of level 1 from image encoder.
-            image_embeddings (torch.Tensor): [B, 256, H/16, W/16]. image embedding from image encoder.
-            point_coords (torch.Tensor): [B, P, 2] shape and float32 dtype and contains the absolute pixel
-                                         coordinate in (x, y) format of the P input points.
-            point_labels (torch.Tensor): shape [B, P] and int32 dtype, where 1 means
-                                         positive (foreground), 0 means negative (background), and -1 means padding.
-            input_masks (torch.Tensor): [B, 1, H/4, W/4]. Low resolution mask input to the model.
-                                        Typically coming from a previous iteration.
-            has_input_masks (torch.Tensor): [B]. 1.0 if input_masks is used, 0.0 otherwise.
-        Returns:
-            masks (torch.Tensor): [B, M, H, W] where M=3 or 1. masks of image_size.
-            iou_predictions (torch.Tensor): [B, M]. scores for M masks.
-            low_res_masks (torch.Tensor, optional): [B, M, H/4, W/4]. low resolution masks.
-        """
-        print("image_features_0.shape", image_features_0.shape)
-        print("image_features_1.shape", image_features_1.shape)
-        print("image_embeddings.shape", image_embeddings.shape)
-        print("point_coords.shape", point_coords.shape)
-        print("point_labels.shape", point_labels.shape)
-
-        if input_masks is not None:
-            print("input_masks.shape", input_masks.shape)
-        else:
-            print("input_masks is None")
-
-        if has_input_masks is not None:
-            print("has_input_masks.shape", has_input_masks.shape)
-        else:
-            print("has_input_masks is None")
-
-        # Boxes shall be converted and concanetate with points, see sam2_image_onnx_predictor.py for details.
-        #boxes = None
-        #sparse_embeddings = self.prompt_encoder._embed_points(point_coords, point_labels, pad=(boxes is None))
-        sparse_embeddings = self.embed_points(point_coords, point_labels)
-        dense_embeddings = self.embed_masks_v2(input_masks, has_input_masks)
-        low_res_masks, iou_predictions, _, _ = self.mask_decoder.predict_masks(
-            image_embeddings=image_embeddings,
-            image_pe=self.prompt_encoder.get_dense_pe(),
-            sparse_prompt_embeddings=sparse_embeddings,
-            dense_prompt_embeddings=dense_embeddings,
-            repeat_image=sparse_embeddings.shape[0] > 1, # batch mode
-            high_res_features=[image_features_0, image_features_1],
-        )
-
-        if self.multimask_output:
-            low_res_masks = low_res_masks[:, 1:, :, :]
-            iou_predictions = iou_predictions[:, 1:]
-        elif self.dynamic_multimask_via_stability:
-            # When outputting a single mask, if the stability score from the current single-mask
-            # output (based on output token 0) falls below a threshold, we instead select from
-            # multi-mask outputs (based on output token 1~3) the mask with the highest predicted IoU score.
-            low_res_masks, iou_predictions = self.mask_decoder._dynamic_multimask_via_stability(
-                low_res_masks, iou_predictions
-            )
-        else:
-            low_res_masks = low_res_masks[:, 0:1, :, :]
-            iou_predictions = iou_predictions[:, 0:1]
-
-        if self.output_low_res_masks:
-            # low_res_masks = torch.clamp(low_res_masks, -32.0, 32.0)
-            return low_res_masks, iou_predictions
-
-        # Compute the original image height and width, then interpolate the low resolution masks to the image size.
-        masks = F.interpolate(
-            low_res_masks,
-            (image_features_0.shape[2] * 4, image_features_0.shape[3] * 4),
-            mode="bilinear",
-            align_corners=False,
-        )
-        return masks, iou_predictions
-
-    def embed_points(self, point_coords: torch.Tensor, point_labels: torch.Tensor) -> torch.Tensor:
-        point_coords = point_coords + 0.5
-
-        padding_point = torch.zeros((point_coords.shape[0], 1, 2), device=point_coords.device)
-        padding_label = -torch.ones((point_labels.shape[0], 1), device=point_labels.device)
-        point_coords = torch.cat([point_coords, padding_point], dim=1)
-        point_labels = torch.cat([point_labels, padding_label], dim=1)
-
-        point_coords[:, :, 0] = point_coords[:, :, 0] / self.model.image_size
-        point_coords[:, :, 1] = point_coords[:, :, 1] / self.model.image_size
-
-        point_embedding = self.prompt_encoder.pe_layer._pe_encoding(point_coords)
-        point_labels = point_labels.unsqueeze(-1).expand_as(point_embedding)
-
-        point_embedding = point_embedding * (point_labels != -1)
-        point_embedding = point_embedding + self.prompt_encoder.not_a_point_embed.weight * (
-                point_labels == -1
-        )
-
-        for i in range(self.prompt_encoder.num_point_embeddings):
-            point_embedding = point_embedding + self.prompt_encoder.point_embeddings[i].weight * (point_labels == i)
-
-        return point_embedding
-
-    def embed_masks_v2(self, input_masks: torch.Tensor, has_input_masks: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            input_masks: shape [B, 1, 256, 256].
-            has_input_masks: shape [B].
-        """
-        if self.support_mask_input:
-            # It is a trade-off between performance and flexibility.
-            mask_embedding = has_input_masks * self.prompt_encoder.mask_downscaling(input_masks) + \
-                        (1.0 - has_input_masks) * self.prompt_encoder.no_mask_embed.weight.reshape(1, -1, 1, 1)
-        else:
-            mask_embedding = self.prompt_encoder.no_mask_embed.weight.reshape(1, -1, 1, 1)
-
-        return mask_embedding
-
-def get_model_cfg(model_type):
-    assert model_type in ["sam2_hiera_tiny", "sam2_hiera_small", "sam2_hiera_large", "sam2_hiera_base_plus"]
-    if model_type == "sam2_hiera_tiny":
-        model_cfg = "sam2_hiera_t.yaml"
-    elif model_type == "sam2_hiera_small":
-        model_cfg = "sam2_hiera_s.yaml"
-    elif model_type == "sam2_hiera_base_plus":
-        model_cfg = "sam2_hiera_b+.yaml"
-    else:
-        model_cfg = "sam2_hiera_l.yaml"
-    return model_cfg
-
-
-def export_encoder_onnx(
-    model_type,
-    dynamic_batch_axes=True,  # Set to False if only support batch size 1.
-    verbose=False,
-):
-    # image_size is configured in yaml file (like sam2_hiera_l.yaml)
-    image_height = 1024
-    image_width = 1024
-
-    sam2_checkpoint = f"checkpoints/{model_type}.pt"
-
-    model_cfg = get_model_cfg(model_type)
-    sam2_model = build_sam2(model_cfg, sam2_checkpoint, device="cpu")
-
-    image = torch.randn(1, 3, image_height, image_width).cpu()
-
-    sam2_encoder = SAM2ImageEncoder(sam2_model).cpu()
-    image_features_0, image_features_1, image_embeddings = sam2_encoder(image)
-    if verbose:
-        print("image.shape", image.shape)
-        print("image_features_0.shape", image_features_0.shape)
-        print("image_features_1.shape", image_features_1.shape)
-        print("image_embeddings.shape", image_embeddings.shape)
-
-    dynamic_axes = None
-    if dynamic_batch_axes:
-        dynamic_axes = {
-            "image": {0: "batch_size"},
-            "image_features_0": {0: "batch_size"},
-            "image_features_1": {0: "batch_size"},
-            "image_embeddings": {0: "batch_size"},
-        }
-
-    onnx_model_path = f"{model_type}_encoder.onnx"
-    torch.onnx.export(
-        sam2_encoder,
-        image,
-        onnx_model_path,
-        export_params=True,
-        opset_version=17,
-        do_constant_folding=True,
-        input_names=["image"],
-        output_names=["image_features_0", "image_features_1", "image_embeddings"],
-        dynamic_axes=dynamic_axes,
+    parser.add_argument(
+        "--model_type",
+        required=False,
+        type=str,
+        choices=["sam2_hiera_tiny", "sam2_hiera_small", "sam2_hiera_large", "sam2_hiera_base_plus"],
+        default="sam2_hiera_large",
+        help="The model type to export",
     )
 
-    print("encoder onnx model saved to ", onnx_model_path)
-
-
-def export_decoder_onnx(
-    model_type,
-    multimask_output=False,
-    support_mask_input=False,
-    output_low_res_masks=True,
-    dynamic_batch_axes=True,  # Set to False will force batch size to be 1.
-    verbose=True,
-):
-    # image_size is configured in yaml file (like sam2_hiera_l.yaml)
-    image_height = 1024
-    image_width = 1024
-
-    sam2_checkpoint = f"checkpoints/{model_type}.pt"
-    model_cfg = get_model_cfg(model_type)
-    sam2_model = build_sam2(model_cfg, sam2_checkpoint, device="cpu")
-    sam2_encoder = SAM2ImageEncoder(sam2_model).cpu()
-
-    # Run encoder to get image features and embeddings.
-    batch_size = 1
-    image = torch.randn(batch_size, 3, image_height, image_width).cpu()
-    image_features_0, image_features_1, image_embeddings = sam2_encoder(image)
-
-    # Enable output_low_res_masks, and run an example inputs to get low resolution masks.
-    sam2_decoder = SAM2ImageDecoder(
-        sam2_model,
-        multimask_output=multimask_output,
-        dynamic_multimask_via_stability=True,
-        output_low_res_masks=output_low_res_masks,
-        support_mask_input=support_mask_input,
-    ).cpu()
-
-    point_coords = torch.randint(low=0, high=min(image_height, image_width), size=(batch_size, 5, 2), dtype=torch.float)
-    point_labels = torch.randint(low=0, high=1, size=(batch_size, 5), dtype=torch.float)
-    input_masks =  torch.zeros(batch_size, 1, image_height // 4, image_width // 4, dtype=torch.float)
-    has_input_masks = torch.ones(batch_size, dtype=torch.float)
-    low_res_masks, iou_predictions  = sam2_decoder(
-        image_features_0,
-        image_features_1,
-        image_embeddings,
-        point_coords,
-        point_labels,
-        input_masks,
-        has_input_masks
+    parser.add_argument(
+        "--components",
+        required=False,
+        nargs='+',
+        choices=["image_encoder", "mask_decoder", "prompt_encoder", "image_decoder"],
+        default=["image_encoder", "image_decoder"],
+        help="Type of ONNX models to export. "
+             "Note that image_decoder is a combination of prompt_encoder and mask_decoder",
     )
 
-    if verbose:
-        #print("masks.shape", masks.shape)
-        print("iou_predictions.shape", iou_predictions.shape)
-        print("low_res_masks.shape", low_res_masks.shape)
-
-    example_inputs = (
-        image_features_0,
-        image_features_1,
-        image_embeddings,
-        point_coords,
-        point_labels,
-        input_masks,
-        has_input_masks
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        help="The output directory for the ONNX models",
+        default="sam2_onnx_models",
     )
 
-    input_names = [
-        "image_features_0",
-        "image_features_1",
-        "image_embeddings",
-        "point_coords",
-        "point_labels",
-        "input_masks",
-        "has_input_masks",
-    ]
-
-    if not support_mask_input:
-        example_inputs = example_inputs[:-2]
-        input_names = input_names[:-2]
-
-    if output_low_res_masks:
-        output_names = ["low_res_masks", "iou_predictions"]
-    else:
-        output_names = ["masks", "iou_predictions"]
-
-    sam2_decoder.output_low_res_masks = output_low_res_masks
-
-    onnx_model_path = (
-        f"{model_type}_decoder"
-        + ("_no-mask-in" if not support_mask_input else "")
-        + ("_multi-mask-out" if multimask_output else "")
-        + ".onnx"
+    parser.add_argument(
+        "--dynamic_batch_axes",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Export image_encoder with dynamic batch axes",
     )
 
-    dynamic_axes = {
-        "point_coords": {1: "num_points"},
-        "point_labels": {1: "num_points"},
-    }
-    if dynamic_batch_axes:
-        dynamic_axes = {
-            "image_features_0": {0: "batch_size"},
-            "image_features_1": {0: "batch_size"},
-            "image_embeddings": {0: "batch_size"},
-            "point_coords": {0: "batch_size", 1: "num_points"},
-            "point_labels": {0: "batch_size", 1: "num_points"},
-            "input_masks": {0: "batch_size"},
-            "has_input_masks": {0: "batch_size"},
-            "masks": {0: "batch_size"},
-            "iou_predictions": {0: "batch_size"},
-            "low_res_masks": {0: "batch_size"},
-        }
-
-    torch.onnx.export(
-        sam2_decoder,
-        example_inputs,
-        onnx_model_path,
-        export_params=True,
-        opset_version=16,
-        do_constant_folding=True,
-        input_names=input_names,
-        output_names=output_names,
-        dynamic_axes=dynamic_axes,
+    parser.add_argument(
+        "--multimask_output",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Export mask_decoder or image_decoder with multimask_output",
     )
 
-    print("decoder onnx model saved to ", onnx_model_path)
+    parser.add_argument(
+        "--disable_dynamic_multimask_via_stability",
+        required=False,
+        action="store_true",
+        help="Disable mask_decoder dynamic_multimask_via_stability, and output first mask only."
+             "This option will be ignored when multimask_output is True",
+    )
+
+    parser.add_argument(
+        "--sam2_dir",
+        required=False,
+        type=str,
+        default="./segment-anything-2",
+        help="The directory of segment-anything-2 git repository",
+    )
+
+    parser.add_argument(
+        "--overwrite",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Overwrite onnx model file if exists.",
+    )
+
+    parser.add_argument(
+        "--demo",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Run demo with the exported ONNX models. Requires GPU.",
+    )
+
+    parser.add_argument(
+        "--verbose",
+        required=False,
+        default=False,
+        action="store_true",
+        help="Print verbose information",
+    )
+
+    args = parser.parse_args()
+    return args
 
 
 def main():
-    # Here we export all combinations. User can choose models based on application.
-    # for model_type in ["sam2_hiera_tiny", "sam2_hiera_small", "sam2_hiera_large", "sam2_hiera_base_plus"]:
-    for model_type in ["sam2_hiera_large"]:
-        export_encoder_onnx(model_type)
-        for multimask_output in [False, True]:
-            for support_mask_input in [False, True]:
-                export_decoder_onnx(model_type, multimask_output=multimask_output, support_mask_input=support_mask_input)
+    args = parse_arguments()
 
+    checkpoints_dir = os.path.join(args.sam2_dir, "checkpoints")
+    sam2_config_dir = os.path.join(args.sam2_dir, "sam2_configs")
+    if not os.path.exists(args.sam2_dir):
+        raise FileNotFoundError(f"{args.sam2_dir} does not exist. Please specify --sam2_dir correctly.")
+
+    if not os.path.exists(checkpoints_dir):
+        raise FileNotFoundError(f"{checkpoints_dir}/checkpoints does not exist. Please specify --sam2_dir correctly.")
+
+    if not os.path.exists(sam2_config_dir):
+        raise FileNotFoundError(f"{sam2_config_dir}/checkpoints does not exist. Please specify --sam2_dir correctly.")
+
+    if not os.path.exists(os.path.join(checkpoints_dir, f"{args.model_type}.pt")):
+        raise FileNotFoundError(f"{checkpoints_dir}/{args.model_type}.pt does not exist. Please run download_ckpts.sh under the checkpoints directory.")
+
+    if args.sam2_dir not in sys.path:
+        sys.path.append(args.sam2_dir)
+
+    pathlib.Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
+    sam2_model = build_sam2_model(checkpoints_dir, args.model_type, device="cpu")
+
+    for component in args.components:
+        if component == "image_encoder":
+            onnx_model_path = get_image_encoder_onnx_path(args.output_dir, args.model_type)
+            if args.overwrite or not os.path.exists(onnx_model_path):
+                export_image_encoder_onnx(sam2_model, onnx_model_path, args.dynamic_batch_axes, args.verbose)
+                test_image_encoder_onnx(sam2_model, onnx_model_path, dynamic_batch_axes=False)
+
+        elif component == "mask_decoder":
+            onnx_model_path = os.path.join(args.output_dir, f"{args.model_type}_mask_decoder.onnx")
+            if args.overwrite or not os.path.exists(onnx_model_path):
+                export_mask_decoder_onnx(sam2_model,
+                                        onnx_model_path,
+                                        args.multimask_output,
+                                        not args.disable_dynamic_multimask_via_stability,
+                                        args.verbose,
+                                        )
+                test_mask_decoder_onnx(sam2_model,
+                                    onnx_model_path,
+                                    args.multimask_output,
+                                    not args.disable_dynamic_multimask_via_stability,
+                                    )
+        elif component == "prompt_encoder":
+            onnx_model_path = os.path.join(args.output_dir, f"{args.model_type}_prompt_encoder.onnx")
+            if args.overwrite or not os.path.exists(onnx_model_path):
+                export_prompt_encoder_onnx(sam2_model, onnx_model_path)
+                test_prompt_encoder_onnx(sam2_model, onnx_model_path)
+        elif component == "image_decoder":
+            onnx_model_path = get_decoder_onnx_path(args.output_dir, args.model_type, args.multimask_output)
+            if args.overwrite or not os.path.exists(onnx_model_path):
+                export_decoder_onnx(sam2_model, onnx_model_path, args.multimask_output)
+                test_decoder_onnx(sam2_model, onnx_model_path, args.multimask_output)
+
+    if args.demo and torch.cuda.is_available():
+        # Export required ONNX models for demo if not already exported.
+        onnx_model_path = get_image_encoder_onnx_path(args.output_dir, args.model_type)
+        if not os.path.exists(onnx_model_path):
+            export_image_encoder_onnx(sam2_model, onnx_model_path, args.dynamic_batch_axes, args.verbose)
+
+        onnx_model_path = get_decoder_onnx_path(args.output_dir, args.model_type, True)
+        if not os.path.exists(onnx_model_path):
+            export_decoder_onnx(sam2_model, onnx_model_path, True)
+
+        onnx_model_path = get_decoder_onnx_path(args.output_dir, args.model_type, False)
+        if not os.path.exists(onnx_model_path):
+            export_decoder_onnx(sam2_model, onnx_model_path, False)
+
+        run_demo(checkpoints_dir,
+                 args.model_type,
+                 engine="ort",
+                 onnx_directory=args.output_dir)
+
+        # Get results from torch engine to compare.
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            run_demo(checkpoints_dir,
+                     args.model_type,
+                     engine="torch",
+                     onnx_directory=args.output_dir)
 
 if __name__ == "__main__":
-    main()
+    setup_logger(verbose=False)
+    with torch.no_grad():
+        main()
