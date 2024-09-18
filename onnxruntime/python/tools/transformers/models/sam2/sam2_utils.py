@@ -4,6 +4,7 @@
 # --------------------------------------------------------------------------
 import logging
 import os
+
 import torch
 from sam2.build_sam import build_sam2
 from sam2.modeling.sam2_base import SAM2Base
@@ -24,18 +25,18 @@ def get_model_cfg(model_type) -> str:
     return model_cfg
 
 
-def build_sam2_model(checkpoint_dir:str, model_type: str, device="cpu") -> SAM2Base:
+def build_sam2_model(checkpoint_dir: str, model_type: str, device="cpu") -> SAM2Base:
     sam2_checkpoint = os.path.join(checkpoint_dir, f"{model_type}.pt")
     model_cfg = get_model_cfg(model_type)
     sam2_model = build_sam2(model_cfg, sam2_checkpoint, device=device)
     return sam2_model
 
 
-def get_decoder_onnx_path(dir:str, model_type, multimask_output) -> str:
-    return  os.path.join(dir, f"{model_type}_decoder" + ("_multi" if multimask_output else "") + ".onnx")
+def get_decoder_onnx_path(dir: str, model_type, multimask_output) -> str:
+    return os.path.join(dir, f"{model_type}_decoder" + ("_multi" if multimask_output else "") + ".onnx")
 
 
-def get_image_encoder_onnx_path(dir:str, model_type) -> str:
+def get_image_encoder_onnx_path(dir: str, model_type) -> str:
     return os.path.join(dir, f"{model_type}_image_encoder.onnx")
 
 
@@ -106,9 +107,11 @@ def compare_tensors_with_tolerance(
 
     return passed
 
+
 def random_sam2_input_image(batch_size=1, image_height=1024, image_width=1024) -> torch.Tensor:
     image = torch.randn(batch_size, 3, image_height, image_width).cpu()
     return image
+
 
 def setup_logger(verbose=True):
     if verbose:

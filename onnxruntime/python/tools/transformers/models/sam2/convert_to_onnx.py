@@ -16,17 +16,19 @@
 #   wget https://raw.githubusercontent.com/facebookresearch/segment-anything-2/main/notebooks/images/truck.jpg
 #   python convert_to_onnx.py  --sam2_dir path/to/segment-anything-2 --demo
 
+import argparse
+import os
 import pathlib
 import sys
-import os
+
 import torch
-import argparse
+from image_decoder import export_decoder_onnx, test_decoder_onnx
 from image_encoder import export_image_encoder_onnx, test_image_encoder_onnx
 from mask_decoder import export_mask_decoder_onnx, test_mask_decoder_onnx
 from prompt_encoder import export_prompt_encoder_onnx, test_prompt_encoder_onnx
-from image_decoder import export_decoder_onnx, test_decoder_onnx
-from sam2_utils import build_sam2_model, get_decoder_onnx_path, get_image_encoder_onnx_path, setup_logger
 from sam2_demo import run_demo
+from sam2_utils import build_sam2_model, get_decoder_onnx_path, get_image_encoder_onnx_path, setup_logger
+
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Export SAM2 models to ONNX")
@@ -43,11 +45,11 @@ def parse_arguments():
     parser.add_argument(
         "--components",
         required=False,
-        nargs='+',
+        nargs="+",
         choices=["image_encoder", "mask_decoder", "prompt_encoder", "image_decoder"],
         default=["image_encoder", "image_decoder"],
         help="Type of ONNX models to export. "
-             "Note that image_decoder is a combination of prompt_encoder and mask_decoder",
+        "Note that image_decoder is a combination of prompt_encoder and mask_decoder",
     )
 
     parser.add_argument(
@@ -78,7 +80,7 @@ def parse_arguments():
         required=False,
         action="store_true",
         help="Disable mask_decoder dynamic_multimask_via_stability, and output first mask only."
-             "This option will be ignored when multimask_output is True",
+        "This option will be ignored when multimask_output is True",
     )
 
     parser.add_argument(
@@ -132,7 +134,9 @@ def main():
         raise FileNotFoundError(f"{sam2_config_dir}/checkpoints does not exist. Please specify --sam2_dir correctly.")
 
     if not os.path.exists(os.path.join(checkpoints_dir, f"{args.model_type}.pt")):
-        raise FileNotFoundError(f"{checkpoints_dir}/{args.model_type}.pt does not exist. Please run download_ckpts.sh under the checkpoints directory.")
+        raise FileNotFoundError(
+            f"{checkpoints_dir}/{args.model_type}.pt does not exist. Please run download_ckpts.sh under the checkpoints directory."
+        )
 
     if args.sam2_dir not in sys.path:
         sys.path.append(args.sam2_dir)
@@ -151,17 +155,19 @@ def main():
         elif component == "mask_decoder":
             onnx_model_path = os.path.join(args.output_dir, f"{args.model_type}_mask_decoder.onnx")
             if args.overwrite or not os.path.exists(onnx_model_path):
-                export_mask_decoder_onnx(sam2_model,
-                                        onnx_model_path,
-                                        args.multimask_output,
-                                        not args.disable_dynamic_multimask_via_stability,
-                                        args.verbose,
-                                        )
-                test_mask_decoder_onnx(sam2_model,
-                                    onnx_model_path,
-                                    args.multimask_output,
-                                    not args.disable_dynamic_multimask_via_stability,
-                                    )
+                export_mask_decoder_onnx(
+                    sam2_model,
+                    onnx_model_path,
+                    args.multimask_output,
+                    not args.disable_dynamic_multimask_via_stability,
+                    args.verbose,
+                )
+                test_mask_decoder_onnx(
+                    sam2_model,
+                    onnx_model_path,
+                    args.multimask_output,
+                    not args.disable_dynamic_multimask_via_stability,
+                )
         elif component == "prompt_encoder":
             onnx_model_path = os.path.join(args.output_dir, f"{args.model_type}_prompt_encoder.onnx")
             if args.overwrite or not os.path.exists(onnx_model_path):
@@ -187,17 +193,12 @@ def main():
         if not os.path.exists(onnx_model_path):
             export_decoder_onnx(sam2_model, onnx_model_path, False)
 
-        run_demo(checkpoints_dir,
-                 args.model_type,
-                 engine="ort",
-                 onnx_directory=args.output_dir)
+        run_demo(checkpoints_dir, args.model_type, engine="ort", onnx_directory=args.output_dir)
 
         # Get results from torch engine to compare.
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            run_demo(checkpoints_dir,
-                     args.model_type,
-                     engine="torch",
-                     onnx_directory=args.output_dir)
+            run_demo(checkpoints_dir, args.model_type, engine="torch", onnx_directory=args.output_dir)
+
 
 if __name__ == "__main__":
     setup_logger(verbose=False)

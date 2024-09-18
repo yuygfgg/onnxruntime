@@ -20,7 +20,7 @@ from image_encoder import SAM2ImageEncoder, random_sam2_input_image
 from mask_decoder import SAM2MaskDecoder
 from prompt_encoder import SAM2PromptEncoder
 from sam2.modeling.sam2_base import SAM2Base
-from sam2_utils import build_sam2_model, compare_tensors_with_tolerance, get_decoder_onnx_path, setup_logger
+from sam2_utils import compare_tensors_with_tolerance
 from torch import nn
 
 logger = logging.getLogger(__name__)
@@ -100,7 +100,7 @@ class SAM2ImageDecoder(nn.Module):
 
 def export_decoder_onnx(
     sam2_model: SAM2Base,
-    onnx_model_path:str,
+    onnx_model_path: str,
     multimask_output: bool = False,
     verbose: bool = False,
 ):
@@ -195,7 +195,7 @@ def export_decoder_onnx(
 
 def test_decoder_onnx(
     sam2_model: SAM2Base,
-    onnx_model_path:str,
+    onnx_model_path: str,
     multimask_output=False,
 ):
 
@@ -257,14 +257,3 @@ def test_decoder_onnx(
         print("onnx model has been verified:", onnx_model_path)
     else:
         print("onnx model verification failed:", onnx_model_path)
-
-
-# if __name__ == "__main__":
-#     setup_logger(verbose=False)
-#     with torch.no_grad():
-#         # for model_type in ["sam2_hiera_tiny", "sam2_hiera_small", "sam2_hiera_large", "sam2_hiera_base_plus"]:
-#         for model_type in ["sam2_hiera_large"]:
-#             for multimask_output in [False, True]:
-#                 onnx_model_path = get_decoder_onnx_path("sam2_onnx_models", model_type, multimask_output)
-#                 export_decoder_onnx(onnx_model_path, model_type, multimask_output=multimask_output)
-#                 test_decoder_onnx(onnx_model_path, model_type, multimask_output=multimask_output)

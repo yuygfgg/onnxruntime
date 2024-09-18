@@ -75,7 +75,13 @@ def show_masks(
             plt.savefig(f"{output_image_file_prefix}_{i}.png")
 
 
-def get_predictor(checkpoint_dir:str, device:torch.device, model_type="sam2_hiera_large", engine="torch", onnx_directory="sam2_onnx_models"):
+def get_predictor(
+    checkpoint_dir: str,
+    device: torch.device,
+    model_type="sam2_hiera_large",
+    engine="torch",
+    onnx_directory="sam2_onnx_models",
+):
     sam2_model = build_sam2_model(checkpoint_dir, model_type, device=device)
     if engine == "torch":
         predictor = SAM2ImagePredictor(sam2_model)
@@ -84,8 +90,13 @@ def get_predictor(checkpoint_dir:str, device:torch.device, model_type="sam2_hier
     return predictor
 
 
-def run_demo(checkpoint_dir:str, model_type="sam2_hiera_large", engine="torch", onnx_directory="sam2_onnx_models",
-             enable_batch=False):
+def run_demo(
+    checkpoint_dir: str,
+    model_type="sam2_hiera_large",
+    engine="torch",
+    onnx_directory="sam2_onnx_models",
+    enable_batch=False,
+):
     if torch.cuda.is_available():
         device = torch.device("cuda")
     else:

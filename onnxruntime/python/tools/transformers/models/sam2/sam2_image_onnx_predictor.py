@@ -11,17 +11,13 @@ import torch
 from PIL.Image import Image
 from sam2.modeling.sam2_base import SAM2Base
 from sam2.sam2_image_predictor import SAM2ImagePredictor
-from sam2_utils import (
-    decoder_shape_dict,
-    encoder_shape_dict,
-    get_decoder_onnx_path,
-    get_image_encoder_onnx_path,
-)
+from sam2_utils import decoder_shape_dict, encoder_shape_dict, get_decoder_onnx_path, get_image_encoder_onnx_path
 
 from onnxruntime import InferenceSession
 from onnxruntime.transformers.io_binding_helper import CudaSession
 
 logger = logging.getLogger(__name__)
+
 
 def create_ort_session(
     onnx_path: str,

@@ -3,10 +3,10 @@
 # Licensed under the MIT License.
 # --------------------------------------------------------------------------
 import logging
-import os
+
 import torch
 from sam2.modeling.sam2_base import SAM2Base
-from sam2_utils import build_sam2_model, compare_tensors_with_tolerance, setup_logger
+from sam2_utils import compare_tensors_with_tolerance
 from torch import nn
 
 logger = logging.getLogger(__name__)
@@ -81,9 +81,9 @@ class SAM2PromptEncoder(nn.Module):
 
 
 def export_prompt_encoder_onnx(
-        sam2_model: SAM2Base,
-        onnx_model_path:str,
-        ):
+    sam2_model: SAM2Base,
+    onnx_model_path: str,
+):
     sam2_prompt_encoder = SAM2PromptEncoder(sam2_model).cpu()
 
     num_labels = 2
@@ -128,8 +128,9 @@ def export_prompt_encoder_onnx(
 
 
 def test_prompt_encoder_onnx(
-        sam2_model: SAM2Base,
-        onnx_model_path:str,):
+    sam2_model: SAM2Base,
+    onnx_model_path: str,
+):
     sam2_prompt_encoder = SAM2PromptEncoder(sam2_model).cpu()
 
     num_labels = 1
@@ -186,12 +187,3 @@ def test_prompt_encoder_onnx(
         print(f"onnx model has been verified: {onnx_model_path}")
     else:
         print(f"onnx model verification failed: {onnx_model_path}")
-
-
-# if __name__ == "__main__":
-#     setup_logger(verbose=True)
-#     with torch.no_grad():
-#         for model_type in ["sam2_hiera_large"]:
-#             onnx_model_path = os.path.join("sam2_onnx_models", f"{model_type}_prompt_encoder.onnx")
-#             export_prompt_encoder_onnx(onnx_model_path, model_type)
-#             test_prompt_encoder_onnx(onnx_model_path, model_type)

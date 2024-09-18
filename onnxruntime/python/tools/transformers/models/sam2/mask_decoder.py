@@ -4,12 +4,11 @@
 # --------------------------------------------------------------------------
 import logging
 import warnings
-import os
+
 import torch
 from image_encoder import SAM2ImageEncoder, random_sam2_input_image
 from prompt_encoder import SAM2PromptEncoder
 from sam2.modeling.sam2_base import SAM2Base
-from sam2_utils import build_sam2_model, setup_logger
 from torch import nn
 
 logger = logging.getLogger(__name__)
@@ -82,7 +81,7 @@ class SAM2MaskDecoder(nn.Module):
 
 def export_mask_decoder_onnx(
     sam2_model: SAM2Base,
-    onnx_model_path:str,
+    onnx_model_path: str,
     multimask_output: bool,
     dynamic_multimask_via_stability: bool = True,
     verbose=False,
@@ -150,11 +149,11 @@ def export_mask_decoder_onnx(
 
 
 def test_mask_decoder_onnx(
-        sam2_model: SAM2Base,
-        onnx_model_path:str,
-        multimask_output: bool,
-        dynamic_multimask_via_stability: bool,
-        ):
+    sam2_model: SAM2Base,
+    onnx_model_path: str,
+    multimask_output: bool,
+    dynamic_multimask_via_stability: bool,
+):
     sam2_prompt_encoder = SAM2PromptEncoder(sam2_model).cpu()
 
     image = random_sam2_input_image()
@@ -207,12 +206,3 @@ def test_mask_decoder_onnx(
     torch.testing.assert_close(low_res_masks, torch.tensor(ort_low_res_masks), atol=5e-3, rtol=1e-4)
     torch.testing.assert_close(iou_predictions, torch.tensor(ort_iou_predictions), atol=5e-3, rtol=1e-4)
     print(f"onnx model has been verified: {onnx_model_path}")
-
-
-# if __name__ == "__main__":
-#     setup_logger(verbose=True)
-#     with torch.no_grad():
-#         for model_type in ["sam2_hiera_large"]:
-#             onnx_model_path = os.path.join("sam2_onnx_models", f"{model_type}_mask_decoder.onnx")
-#             export_mask_decoder_onnx(onnx_model_path, model_type, multimask_output=False, dynamic_multimask_via_stability=True)
-#             test_mask_decoder_onnx(onnx_model_path, model_type, multimask_output=False, dynamic_multimask_via_stability=True)

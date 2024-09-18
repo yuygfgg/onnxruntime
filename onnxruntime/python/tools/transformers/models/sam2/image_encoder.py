@@ -7,7 +7,7 @@ import warnings
 
 import torch
 from sam2.modeling.sam2_base import SAM2Base
-from sam2_utils import random_sam2_input_image, compare_tensors_with_tolerance, setup_logger
+from sam2_utils import compare_tensors_with_tolerance, random_sam2_input_image
 from torch import nn
 
 import onnxruntime
@@ -65,9 +65,9 @@ class SAM2ImageEncoder(nn.Module):
 
 def export_image_encoder_onnx(
     sam2_model: SAM2Base,
-    onnx_model_path:str,
-    dynamic_batch_axes:bool=False,
-    verbose:bool=False,
+    onnx_model_path: str,
+    dynamic_batch_axes: bool = False,
+    verbose: bool = False,
 ):
     image = random_sam2_input_image()
 
@@ -105,9 +105,10 @@ def export_image_encoder_onnx(
 
     print("encoder onnx model saved to", onnx_model_path)
 
+
 def test_image_encoder_onnx(
     sam2_model: SAM2Base,
-    onnx_model_path:str,
+    onnx_model_path: str,
     dynamic_batch_axes=False,
 ):
     ort_session = onnxruntime.InferenceSession(onnx_model_path, providers=onnxruntime.get_available_providers())
