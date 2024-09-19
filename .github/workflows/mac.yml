@@ -3,11 +3,11 @@ name: Mac_CI
 on:
   push:
     branches:
-    - main
+    - jicwen/coreml_fp16
     - rel-*
   pull_request:
     branches:
-    - main
+    - jicwen/coreml_fp16
     - rel-*
   workflow_dispatch:
 
@@ -51,12 +51,17 @@ jobs:
           --build_dir ./build \
           --update \
           --build --parallel \
-          --test \
-          --build_shared_lib \
+          # --test \
           --build_objc \
           --use_coreml \
           --use_xnnpack \
           --use_binskim_compliant_compile_flags
+
+    - name: Upload ARM64 build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: arm64-build
+        path: ./build/
 
   Vcpkg:
     runs-on: macos-13
@@ -77,11 +82,9 @@ jobs:
       env:
         VCPKG_INSTALLED_DIR: "${{ github.workspace }}/.build"
         VCPKG_DEFAULT_TRIPLET: "x64-osx"
-        # VCPKG_BINARY_SOURCES: "default" # https://learn.microsoft.com/en-us/vcpkg/reference/binarycaching
 
     - name: "Run compile_schema.py"
       run: |
-        # Runner's host triplet should be x64-osx or arm64-osx
         export FLATC_DIR="${{ github.workspace }}/.build/${{ runner.arch }}-osx/tools/flatbuffers"
         export PATH="$FLATC_DIR:$PATH"
         flatc --version
@@ -100,7 +103,6 @@ jobs:
         python ./tools/ci_build/build.py \
           --build_dir "build/x64-osx" \
           --skip_submodule_sync \
-          --skip_tests \
           --compile_no_warning_as_error \
           --parallel \
           --path_to_protoc_exe "${{ steps.protoc-detect.outputs.protoc_path }}" \
@@ -123,14 +125,12 @@ jobs:
       env:
         VCPKG_INSTALLED_DIR: "${{ github.workspace }}/.build"
         VCPKG_DEFAULT_TRIPLET: "arm64-osx"
-        # VCPKG_BINARY_SOURCES: "default" # https://learn.microsoft.com/en-us/vcpkg/reference/binarycaching
 
     - name: "Run build.py(arm64-osx)"
       run: |
         python ./tools/ci_build/build.py \
           --build_dir "build/arm64-osx" \
           --skip_submodule_sync \
-          --skip_tests \
           --compile_no_warning_as_error \
           --parallel \
           --path_to_protoc_exe "${{ steps.protoc-detect.outputs.protoc_path }}" \
@@ -140,7 +140,14 @@ jobs:
           --cmake_extra_defines "VCPKG_TARGET_TRIPLET=arm64-osx" \
           --cmake_extra_defines "VCPKG_INSTALLED_DIR:PATH=${{ github.workspace }}/.build" \
           --cmake_extra_defines "VCPKG_INSTALL_OPTIONS=--x-feature=tests"
+        ls
       shell: bash
+
+    - name: Upload ARM64 build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: arm64-vcpkg-build
+        path: build/arm64-osx
 
   Objective-C-StaticAnalysis:
     runs-on: macos-14
@@ -167,7 +174,6 @@ jobs:
           --build_dir ./build \
           --cmake_generator "Unix Makefiles" \
           --config Debug \
-          --build_shared_lib \
           --use_coreml \
           --build_objc \
           --enable_training_apis \
