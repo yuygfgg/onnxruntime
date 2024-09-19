@@ -21,20 +21,12 @@ env:
 
 jobs:
   ARM64:
-    runs-on: macos-14
-
-    timeout-minutes: 60
+    runs-on: macos-latest
 
     steps:
     - uses: actions/setup-python@v5
       with:
         python-version: ${{ env.python_version }}
-
-    - name: Verify ARM64 machine
-      shell: python
-      run: |
-        import platform
-        assert platform.machine() == "arm64", "This job expects to be run on an ARM64 machine."
 
     - name: Use Xcode ${{ env.xcode_version }}
       shell: bash
