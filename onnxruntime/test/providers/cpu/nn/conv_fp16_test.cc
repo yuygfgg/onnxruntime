@@ -3,7 +3,7 @@
 
 #include "core/mlas/inc/mlas.h"
 
-#ifdef MLAS_F16VEC_INTRINSICS_SUPPORTED
+#if defined(MLAS_F16VEC_INTRINSICS_SUPPORTED) || defined(COREML_ENABLE_MLPROGRAM)
 
 #include "gtest/gtest.h"
 #include "test/providers/provider_test_utils.h"
@@ -37,6 +37,12 @@ void TestConvFp16Op(const ConvOpAndTestAttributes& attributes,
                     OpTester::ExpectResult expect_result = OpTester::ExpectResult::kExpectSuccess,
                     const std::string& err_str = "",
                     int opset = 11) {
+#if !defined(MLAS_F16VEC_INTRINSICS_SUPPORTED)
+// a `return` after tester will make binary crash
+  if (!attributes.activation.empty()) {
+      return;
+  }
+#endif
   std::unique_ptr<OpTester> tester;
   if (!attributes.activation.empty()) {
     tester = std::make_unique<OpTester>("NhwcFusedConv", 1, onnxruntime::kMSDomain);
