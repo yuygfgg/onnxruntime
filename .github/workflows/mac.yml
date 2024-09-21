@@ -49,9 +49,11 @@ jobs:
           --use_coreml \
           --use_xnnpack \
           --use_binskim_compliant_compile_flags
+        ls
+        ls ./build
 
     - name: Upload ARM64 build artifacts
       uses: actions/upload-artifact@v4
       with:
         name: arm64-build
-        path: ./build/
+        path: ./build/libs
