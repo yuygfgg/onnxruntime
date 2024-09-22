@@ -49,11 +49,11 @@ jobs:
           --use_coreml \
           --use_xnnpack \
           --use_binskim_compliant_compile_flags
-        ls
-        ls ./build
+        mkdir -p ./upload
+        find . -name "*.dylib" -exec cp {} ./upload \;
 
     - name: Upload ARM64 build artifacts
       uses: actions/upload-artifact@v4
       with:
         name: arm64-build
-        path: ./build/onnxruntime
+        path: ./upload
